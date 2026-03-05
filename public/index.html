@@ -1,0 +1,313 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Question Practice</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; display: flex; gap: 1rem; }
+    #left { flex: 1 1 60%; }
+    #right { flex: 1 1 35%; border-left: 1px solid #eee; padding-left: 1rem; }
+    .question { margin-bottom: 1rem; font-weight: 600; }
+    textarea { width: 100%; height: 160px; margin-bottom: 0.5rem; font-size: 14px; }
+    button { padding: 0.45rem 0.9rem; margin-right: 0.5rem; }
+    .meta { color: #555; margin-bottom: 1rem; }
+    ul { padding-left: 1rem; }
+    li.session { cursor: pointer; color: #0366d6; margin-bottom: 0.3rem; }
+    li.qitem { cursor: pointer; margin-bottom: 0.25rem; }
+    .small { font-size: 12px; color: #666; }
+    .selected { background: #f0f8ff; }
+  </style>
+</head>
+<body>
+  <div id="left">
+    <h1>Practice — question_bank</h1>
+    <div class="meta">Session: <span id="session">not started</span></div>
+
+    <div id="container">
+      <div id="qidx" class="question">Loading questions...</div>
+      <div id="text" style="white-space:pre-wrap; margin-bottom:1rem;"></div>
+      <textarea id="answer" placeholder="Write your answer here..."></textarea>
+      <div style="margin-bottom:1rem;">
+        <button id="commit">Commit</button>
+        <button id="commitAll">Commit all</button>
+        <button id="newSession">New Session</button>
+        <button id="skip">Skip</button>
+        <button id="prev">Prev</button>
+        <button id="next">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="right">
+    <h3>Available sessions</h3>
+    <div id="sessionsWrap"><em>Loading...</em></div>
+
+    <hr/>
+
+    <h3>Session questions</h3>
+    <div id="loadedInfo" class="small">No loaded session</div>
+    <ul id="sessionQuestions"></ul>
+    <div style="margin-top:0.5rem;">
+      <button id="startFromLoaded">Start new run from loaded session</button>
+    </div>
+
+    <hr/>
+
+    <h3>Active question list</h3>
+    <ul id="activeList"></ul>
+  </div>
+
+  <script>
+    let allQuestions = []; // canonical full question bank
+    let questions = [];     // active question list (usually same as allQuestions)
+    let idx = 0;
+    let filename = null;
+    let answers = {}; // map idx -> text
+
+    // data from previously loaded session (entries with index/question/answer)
+    let loadedSession = null;
+
+    function el(id) { return document.getElementById(id); }
+
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error('Network error ' + res.status);
+      return res.json();
+    }
+
+    async function loadQuestions() {
+      try {
+        const json = await fetchJSON('/questions');
+        allQuestions = json.questions || [];
+        // initialize active questions to the full bank
+        questions = allQuestions.slice();
+        if (!questions.length) {
+          el('qidx').textContent = 'No questions found in question_bank.md';
+          renderActiveList();
+          return;
+        }
+        render();
+        renderActiveList();
+      } catch (e) {
+        el('qidx').textContent = 'Failed to load questions';
+      }
+      loadSessions();
+    }
+
+    async function loadSessions() {
+      try {
+        const json = await fetchJSON('/sessions');
+        const wrap = el('sessionsWrap');
+        wrap.innerHTML = '';
+        if (!json.sessions || !json.sessions.length) {
+          wrap.innerHTML = '<div class="small">No sessions yet</div>';
+          return;
+        }
+        const ul = document.createElement('ul');
+        json.sessions.forEach(s => {
+          const li = document.createElement('li');
+          li.className = 'session';
+          li.textContent = s.filename + ' ';
+          const meta = document.createElement('span');
+          meta.className = 'small';
+          meta.textContent = '(' + s.mtime + ')';
+          li.appendChild(meta);
+          li.addEventListener('click', () => loadSessionFile(s.filename, li));
+          ul.appendChild(li);
+        });
+        wrap.appendChild(ul);
+      } catch (e) {
+        el('sessionsWrap').textContent = 'Failed to list sessions';
+      }
+    }
+
+    async function loadSessionFile(fname, liEl) {
+      // visual selection
+      Array.from(document.querySelectorAll('li.session')).forEach(x => x.classList.remove('selected'));
+      if (liEl) liEl.classList.add('selected');
+
+      try {
+        const json = await fetchJSON('/session/' + encodeURIComponent(fname));
+        loadedSession = { filename: fname, entries: json.entries || [] };
+        el('loadedInfo').textContent = 'Loaded ' + fname;
+        renderSessionQuestions();
+      } catch (e) {
+        el('loadedInfo').textContent = 'Failed to load session';
+        loadedSession = null;
+        renderSessionQuestions();
+      }
+    }
+
+    function renderSessionQuestions() {
+      const ul = el('sessionQuestions');
+      ul.innerHTML = '';
+      if (!loadedSession) {
+        ul.innerHTML = '<li class="small">No loaded session</li>';
+        return;
+      }
+      loadedSession.entries.forEach((ent, i) => {
+        const li = document.createElement('li');
+        li.className = 'qitem';
+        li.textContent = (ent.index + 1) + '. ' + ent.question;
+        li.addEventListener('click', () => {
+          // ensure active list is the full question bank, and set active index to the original question index
+          if (allQuestions.length) {
+            questions = allQuestions.slice();
+            renderActiveList();
+          }
+          saveCurrentAnswer();
+          idx = typeof ent.index === 'number' ? ent.index : i;
+          el('qidx').textContent = 'Question ' + (idx + 1) + ' / ' + questions.length;
+          el('text').textContent = ent.question;
+          el('answer').value = ent.answer || '';
+        });
+        ul.appendChild(li);
+      });
+    }
+
+    function renderActiveList() {
+      const ul = el('activeList');
+      ul.innerHTML = '';
+      if (!questions.length) {
+        ul.innerHTML = '<li class="small">No active questions</li>';
+        return;
+      }
+      questions.forEach((q, i) => {
+        const li = document.createElement('li');
+        li.className = 'qitem';
+        li.textContent = (i + 1) + '. ' + q;
+        li.addEventListener('click', () => {
+          saveCurrentAnswer();
+          idx = i;
+          render();
+        });
+        // highlight currently active
+        if (i === idx) li.classList.add('selected');
+        ul.appendChild(li);
+      });
+    }
+
+    async function startSession() {
+      try {
+        const json = await fetchJSON('/start', { method: 'POST', headers: {'Content-Type':'application/json'} });
+        filename = json.filename;
+        el('session').textContent = filename;
+      } catch (e) {
+        alert('Failed to start session');
+      }
+    }
+
+    function render() {
+      if (!questions.length) {
+        el('qidx').textContent = 'No questions loaded';
+        el('text').textContent = '';
+        el('answer').value = '';
+        return;
+      }
+      el('qidx').textContent = 'Question ' + (idx + 1) + ' / ' + questions.length;
+      el('text').textContent = questions[idx];
+      el('answer').value = answers.hasOwnProperty(idx) ? answers[idx] : '';
+      renderActiveList();
+    }
+
+    function saveCurrentAnswer() {
+      if (!questions.length) return;
+      const v = el('answer').value;
+      if (v && v.trim().length) answers[idx] = v;
+      else if (answers.hasOwnProperty(idx) && (!v || !v.trim())) delete answers[idx];
+    }
+
+    async function commitAnswer() {
+      if (!filename) {
+        alert('Session not started');
+        return;
+      }
+      saveCurrentAnswer();
+      const payload = { filename, index: idx, question: questions[idx], answer: answers[idx] || '' };
+      try {
+        const json = await fetchJSON('/commit', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        if (json.ok) {
+          if (idx < questions.length - 1) idx++;
+          render();
+        } else {
+          alert('Failed to save: ' + (json.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('Failed to save');
+      }
+    }
+
+    async function commitAll() {
+      if (!filename) {
+        alert('Session not started');
+        return;
+      }
+      saveCurrentAnswer();
+      try {
+        const payload = { filename, questions, answers };
+        const json = await fetchJSON('/commit_all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        if (json.ok) {
+          alert('All answers appended to ' + filename);
+        } else {
+          alert('Failed to commit all: ' + (json.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('Failed to commit all');
+      }
+    }
+
+    document.getElementById('commit').addEventListener('click', commitAnswer);
+    document.getElementById('commitAll').addEventListener('click', commitAll);
+    document.getElementById('skip').addEventListener('click', () => { if (idx < questions.length -1) { saveCurrentAnswer(); idx++; render(); } });
+    document.getElementById('next').addEventListener('click', () => { if (idx < questions.length -1) { saveCurrentAnswer(); idx++; render(); } });
+    document.getElementById('prev').addEventListener('click', () => { if (idx > 0) { saveCurrentAnswer(); idx--; render(); } });
+
+    // start a run from the currently loaded session:
+    // - use the full question bank as active questions
+    // - prefill answers at their original indices so "Next" continues into the rest of the bank
+    document.getElementById('startFromLoaded').addEventListener('click', async () => {
+      if (!loadedSession) { alert('No session loaded'); return; }
+      try {
+        const json = await fetchJSON('/start', { method: 'POST', headers: {'Content-Type':'application/json'} });
+        filename = json.filename;
+        el('session').textContent = filename;
+
+        // ensure active questions are the full bank
+        questions = allQuestions.slice();
+
+        // prefill answers using the original indices from the session entries
+        answers = {};
+        loadedSession.entries.forEach(e => {
+          if (e.answer && e.answer.trim()) answers[e.index] = e.answer;
+        });
+
+        // start at the first of those saved indices if available, else 0
+        idx = (loadedSession.entries.length && typeof loadedSession.entries[0].index === 'number') ? loadedSession.entries[0].index : 0;
+
+        render();
+      } catch (e) {
+        alert('Failed to start new run from session');
+      }
+    });
+
+    // NEW: start brand-new session from question 1
+    document.getElementById('newSession').addEventListener('click', async () => {
+      try {
+        const json = await fetchJSON('/start', { method: 'POST', headers: {'Content-Type':'application/json'} });
+        filename = json.filename;
+        el('session').textContent = filename;
+        // reset active questions to full bank and clear answers
+        questions = allQuestions.slice();
+        answers = {};
+        idx = 0;
+        render();
+      } catch (e) {
+        alert('Failed to create new session');
+      }
+    });
+
+    // init
+    loadQuestions();
+  </script>
+</body>
+</html>
